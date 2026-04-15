@@ -55,7 +55,7 @@ class PatientMonitorApp:
         master_font = font.Font(family="Helvetica", size=28, weight="bold")
         btn_font = font.Font(family="Helvetica", size=14, weight="bold")
         
-        tk.Label(self.dash_frame, text="TELEMETRY CONTROL", font=title_font, fg="#ffffff", bg="#1e1e1e").pack(pady=(20, 10))
+        tk.Label(self.dash_frame, text="Distress Predictor", font=title_font, fg="#ffffff", bg="#1e1e1e").pack(pady=(20, 10))
         
         # --- ENGINE CONTROLS ---
         self.control_frame = tk.Frame(self.dash_frame, bg="#1e1e1e")
@@ -89,13 +89,13 @@ class PatientMonitorApp:
         self.btn_vitals.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
         
         # --- SENSOR DATA LABELS ---
-        self.lbl_face = tk.Label(self.dash_frame, text="Face Distress: Standby", font=self.data_font, fg="#aaaaaa", bg="#1e1e1e")
+        self.lbl_face = tk.Label(self.dash_frame, text="Face Distress: Standby", font=self.data_font, fg="#aaaaaa", bg="#1e1e1e", justify=tk.LEFT)
         self.lbl_face.pack(pady=12, anchor="w", padx=25)
         
-        self.lbl_hand = tk.Label(self.dash_frame, text="Gesture: Standby", font=self.data_font, fg="#aaaaaa", bg="#1e1e1e")
+        self.lbl_hand = tk.Label(self.dash_frame, text="Gesture: Standby\nShake Intensity: N/A", font=self.data_font, fg="#aaaaaa", bg="#1e1e1e", justify=tk.LEFT)
         self.lbl_hand.pack(pady=12, anchor="w", padx=25)
         
-        self.lbl_vitals = tk.Label(self.dash_frame, text="Heart Rate: Standby", font=self.data_font, fg="#aaaaaa", bg="#1e1e1e")
+        self.lbl_vitals = tk.Label(self.dash_frame, text="Heart Rate: Standby", font=self.data_font, fg="#aaaaaa", bg="#1e1e1e", justify=tk.LEFT)
         self.lbl_vitals.pack(pady=12, anchor="w", padx=25)
         
         tk.Frame(self.dash_frame, height=1, bg="#333333").pack(fill=tk.X, pady=30, padx=20)
@@ -175,43 +175,79 @@ class PatientMonitorApp:
                         py_min, py_max = int(box['y_min'] * img_h), int(box['y_max'] * img_h)
                         cv2.rectangle(frame, (px_min, py_min), (px_max, py_max), (255, 255, 0), 1)
 
+                # ==========================================
+                # --- NEW DYNAMIC MULTIMODAL FUSION MATH ---
+                # ==========================================
+                
+                # Check exactly what hardware is alive and transmitting
+                face_available = self.face_ai.engine_active
+                vitals_available = self.vitals_ai.engine_active and self.vitals_ai.is_connected
+                hand_available = self.hand_ai.engine_active
+
+                # Pull the raw scores
+                face_score = self.face_ai.current_score if face_available else 0
+                vitals_score = self.vitals_ai.current_score if vitals_available else 0
+                shake_score = self.hand_ai.current_shake_metric if hand_available else 0
+
+                # Initialize weights
                 weight_face = 0.0
                 weight_vitals = 0.0
-                face_score = self.face_ai.current_score if self.face_ai.engine_active else 0
-                vitals_score = self.vitals_ai.current_score if (self.vitals_ai.engine_active and self.vitals_ai.is_connected) else 0
+                weight_shake = 0.0
 
-                vitals_available = self.vitals_ai.engine_active and self.vitals_ai.is_connected
-                face_available = self.face_ai.engine_active
-
-                if face_available and vitals_available:
+                # 3-Way Fusion (All Sensors Active)
+                if face_available and vitals_available and hand_available:
+                    weight_face, weight_vitals, weight_shake = 0.25, 0.55, 0.20
+                
+                # 2-Way Fusions (Dynamic Fallbacks)
+                elif face_available and vitals_available:
                     weight_face, weight_vitals = 0.3, 0.7
-                elif face_available and not vitals_available:
-                    weight_face, weight_vitals = 1.0, 0.0
-                elif not face_available and vitals_available:
-                    weight_face, weight_vitals = 0.0, 1.0
+                elif face_available and hand_available:
+                    weight_face, weight_shake = 0.6, 0.4
+                elif vitals_available and hand_available:
+                    weight_vitals, weight_shake = 0.7, 0.3
+                
+                # 1-Way Fusions (Absolute Fallbacks)
+                elif face_available:
+                    weight_face = 1.0
+                elif vitals_available:
+                    weight_vitals = 1.0
+                elif hand_available:
+                    weight_shake = 1.0
 
+                # Check for Absolute Overrides (Choking or Critical HR)
                 override_active = False
                 final_distress = 0.0
 
-                if self.hand_ai.engine_active and self.hand_ai.current_score == 100:
+                if hand_available and self.hand_ai.current_score == 100:
                     final_distress = 100.0
                     override_active = True
                 if self.vitals_ai.engine_active and self.vitals_ai.current_score == 100:
                     final_distress = 100.0
                     override_active = True
 
+                # Calculate final score
                 if not override_active:
-                    final_distress = (face_score * weight_face) + (vitals_score * weight_vitals)
+                    final_distress = (face_score * weight_face) + (vitals_score * weight_vitals) + (shake_score * weight_shake)
+                
+                # ==========================================
 
                 if self.face_ai.engine_active:
                     self.lbl_face.config(text=f"Face Distress: {self.face_ai.current_score:.1f}%", fg="#ff4444" if self.face_ai.current_score > 50 else "#00ff00")
                 else:
                     self.lbl_face.config(text="Face Distress: DISABLED", fg="#555555")
 
+                # --- Hand UI (Updated with Shake Metrics) ---
                 if self.hand_ai.engine_active:
-                    self.lbl_hand.config(text=f"Gesture: {self.hand_ai.current_gesture}", fg="#ff4444" if self.hand_ai.current_score == 100 else "#00ff00")
+                    hand_status = f"Gesture: {self.hand_ai.current_gesture}\nShake Intensity: {self.hand_ai.current_shake_metric:.0f}%"
+                    txt_color = "#00ff00" 
+                    if self.hand_ai.current_score == 100:
+                        txt_color = "#ff4444" 
+                    elif self.hand_ai.current_shake_metric > 40:
+                        txt_color = "#FFA500" 
+                        
+                    self.lbl_hand.config(text=hand_status, fg=txt_color, justify=tk.LEFT)
                 else:
-                    self.lbl_hand.config(text="Gesture: DISABLED", fg="#555555")
+                    self.lbl_hand.config(text="Gesture: DISABLED\nShake Intensity: N/A", fg="#555555", justify=tk.LEFT)
 
                 if self.vitals_ai.engine_active:
                     if self.vitals_ai.is_connected:
@@ -234,7 +270,7 @@ class PatientMonitorApp:
             
             else:
                 self.lbl_face.config(text="Face Distress: PAUSED", fg="#aaaaaa")
-                self.lbl_hand.config(text="Gesture: PAUSED", fg="#aaaaaa")
+                self.lbl_hand.config(text="Gesture: PAUSED\nShake Intensity: N/A", fg="#aaaaaa")
                 self.lbl_vitals.config(text="Heart Rate: PAUSED", fg="#aaaaaa")
                 self.lbl_master.config(text="PAUSED", fg="#aaaaaa")
                 self.dash_frame.config(bg="#1e1e1e")
